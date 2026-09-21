@@ -21,25 +21,39 @@ because the old artifact had no real backend — now that there is one, it's no 
 The WhatsApp/SMS "alert the owner" step is still there and unchanged, since that's still how
 the owner gets pinged immediately.
 
-## 1. Create the Firebase project
+## 1. Firebase project
 
-1. Go to the [Firebase console](https://console.firebase.google.com/) → **Add project**.
-2. Enable **Firestore Database** (production mode is fine — the rules below lock it down).
-3. Enable **Authentication → Sign-in method → Email/Password**.
-4. In **Authentication → Users**, add exactly one user. Its email doesn't matter (customers
-   never see or type it) but it must match `REACT_APP_OWNER_EMAIL` below — the default is
-   `owner@eves-sweets.local`. **Its password is the dashboard PIN** the baker will type on
-   the "🔒 Baker Login" screen — pick anything at least 6 characters (Firebase's minimum);
-   the original PIN was `1234`, but Firebase requires 6+ characters for a password, so choose
-   something like `eves1234` if you want to keep it PIN-like.
-5. In **Project settings → General → Your apps**, add a Web app and copy its config values
-   into a `.env.local` file in this folder (see `.env.example`), or set them directly as
-   environment variables in your hosting provider (Netlify/Vercel).
+This app is set up to **reuse the existing `sitetime-masterbuilders` Firebase project**
+(the same one the SiteTime time-tracking app at the repo root uses), rather than a separate
+project. `.env.local` in this folder already has that project's config filled in (it's
+gitignored, so re-copy it from `.env.example` + the values in the repo root's `firebase.js`
+if you ever lose it locally). Firestore collection names don't collide — SiteTime uses
+`employees`/`punches`/`sites`, Eve's Sweets uses `settings`/`menu`/`orders`/`counters` — so
+both apps can safely share the project.
+
+Two things still need doing once, in the Firebase console for that project:
+
+1. Enable **Authentication → Sign-in method → Email/Password** (if not already on).
+2. In **Authentication → Users**, add exactly one user for Eve's Sweets. Its email doesn't
+   matter (customers never see or type it) but it must match `REACT_APP_OWNER_EMAIL` in
+   `.env.local` — the default is `owner@eves-sweets.local`. **Its password is the dashboard
+   PIN** the baker will type on the "🔒 Baker Login" screen — Firebase requires 6+ characters,
+   so something like `eves1234` keeps it PIN-like. (SiteTime doesn't use Firebase Auth at all,
+   so there's no naming conflict here either.)
+
+If you'd rather split Eve's Sweets into its own separate Firebase project later, nothing
+above is hard to redo — just swap the values in `.env.local` for the new project's config.
 
 ## 2. Set the Firestore security rules
 
-In the Firebase console, go to **Firestore Database → Rules** and paste in the contents of
-`firestore.rules` from this folder, then Publish. Short version of what it does:
+**Because this project is shared with SiteTime, don't just paste `firestore.rules` from this
+folder in and Publish — that would replace whatever rules currently protect SiteTime's
+`employees`/`punches`/`sites` collections.** Instead: open **Firestore Database → Rules** in
+the console, copy the *current* rules text out, and merge in the `match` blocks from
+`firestore.rules` here (they're scoped to `/settings`, `/menu`, `/orders`, `/counters`, so
+they slot in as additional `match` blocks inside the same `service cloud.firestore { match
+/databases/{database}/documents { ... } }` wrapper without touching SiteTime's existing
+blocks). Short version of what Eve's Sweets' rules do:
 - Menu items and business settings: anyone can read (that's the public ordering page),
   only the signed-in owner can write.
 - Orders: anyone can create one (that's how customers place orders without an account);
@@ -50,7 +64,7 @@ In the Firebase console, go to **Firestore Database → Rules** and paste in the
 original app, which embedded its entire settings JSON (including the PIN) in the public page
 source — anyone could already view-source it. This rebuild is not a regression on that front,
 but if you'd like the dashboard PIN to stop being a plaintext value anywhere, that's already
-true here: the real gate is a Firebase Auth password (see step 1.4), and the `pin` field
+true here: the real gate is a Firebase Auth password (see step 1.2), and the `pin` field
 from the old data is no longer used or stored.
 
 ## 3. Import the current live menu (one-time)
