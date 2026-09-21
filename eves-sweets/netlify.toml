@@ -1,0 +1,9 @@
+[build]
+  command = "npm run build"
+  publish = "build"
+  functions = "netlify/functions"
+
+# No SPA catch-all redirect needed: the app uses hash-based routing (#dashboard), which never
+# touches the server, so plain "/" always serving index.html is already enough — and a
+# catch-all "/*" redirect risks swallowing "/.netlify/functions/*" requests instead of letting
+# them reach the Functions.

@@ -1,112 +1,121 @@
-import { useEffect, useState } from "react";
-import {
-  collection,
-  doc,
-  addDoc,
-  updateDoc,
-  deleteDoc,
-  setDoc,
-  onSnapshot,
-  runTransaction,
-  serverTimestamp,
-} from "firebase/firestore";
-import { db } from "../firebase";
+import { useEffect, useRef, useState } from "react";
+import { authedFetch } from "./auth";
 
-const SETTINGS_DOC = doc(db, "settings", "main");
-const ORDER_COUNTER_DOC = doc(db, "counters", "orders");
+const SETTINGS_URL = "/.netlify/functions/settings";
+const MENU_URL = "/.netlify/functions/menu";
+const ORDERS_URL = "/.netlify/functions/orders";
 
-export const DEFAULT_SETTINGS = {
-  businessName: "My Bakery",
-  whatsappNumber: "",
-  currency: "$",
-  deliveryFee: 0,
-  logo: null,
-  promoCodes: [],
-};
-
-export function useSettings() {
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    const unsub = onSnapshot(SETTINGS_DOC, (snap) => {
-      setSettings(snap.exists() ? { ...DEFAULT_SETTINGS, ...snap.data() } : DEFAULT_SETTINGS);
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
-  return { settings, loading };
+// Netlify Blobs has no real-time push like Firestore's onSnapshot, so every device polls
+// instead. A write also calls invalidate() for its own URL so the tab that just made the
+// change updates immediately rather than waiting out the poll interval — other devices still
+// see it within one poll cycle, which is what "no caching ambiguity" means here: every poll
+// is a fresh read, never a stale cached page.
+let invalidateListeners = {};
+function invalidate(url) {
+  (invalidateListeners[url] || []).forEach((fn) => fn());
+}
+function onInvalidate(url, fn) {
+  invalidateListeners[url] = invalidateListeners[url] || [];
+  invalidateListeners[url].push(fn);
+  return () => {
+    invalidateListeners[url] = (invalidateListeners[url] || []).filter((f) => f !== fn);
+  };
 }
 
-export function saveSettings(newSettings) {
-  return setDoc(SETTINGS_DOC, newSettings, { merge: false });
+async function publicGet(url) {
+  const res = await fetch(url);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Request failed");
+  return data;
+}
+
+function usePolled(url, { intervalMs, authed = false, fallback }) {
+  const [data, setData] = useState(fallback);
+  const [loading, setLoading] = useState(true);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    async function load() {
+      try {
+        const result = authed ? await authedFetch(url) : await publicGet(url);
+        if (mountedRef.current) setData(result);
+      } catch (e) {
+        // keep showing the last-known-good data rather than clearing it on a transient error
+      } finally {
+        if (mountedRef.current) setLoading(false);
+      }
+    }
+    load();
+    const timer = setInterval(load, intervalMs);
+    const unsubscribe = onInvalidate(url, load);
+    return () => {
+      mountedRef.current = false;
+      clearInterval(timer);
+      unsubscribe();
+    };
+  }, [url, intervalMs, authed]);
+
+  return { data, loading };
+}
+
+export function useSettings() {
+  const { data, loading } = usePolled(SETTINGS_URL, { intervalMs: 8000, fallback: {} });
+  return { settings: data, loading };
+}
+
+export async function saveSettings(newSettings) {
+  await authedFetch(SETTINGS_URL, { method: "POST", body: JSON.stringify(newSettings) });
+  invalidate(SETTINGS_URL);
 }
 
 export function useMenu() {
-  const [menu, setMenu] = useState([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, "menu"), (snap) => {
-      setMenu(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
-  return { menu, loading };
+  const { data, loading } = usePolled(MENU_URL, { intervalMs: 8000, fallback: [] });
+  return { menu: data, loading };
 }
 
-export function addMenuItem(item) {
-  return addDoc(collection(db, "menu"), item);
+export async function addMenuItem(item) {
+  const created = await authedFetch(MENU_URL, { method: "POST", body: JSON.stringify(item) });
+  invalidate(MENU_URL);
+  return created;
 }
 
-export function updateMenuItem(id, patch) {
-  return updateDoc(doc(db, "menu", id), patch);
+export async function updateMenuItem(id, patch) {
+  const updated = await authedFetch(MENU_URL, { method: "PUT", body: JSON.stringify({ id, patch }) });
+  invalidate(MENU_URL);
+  return updated;
 }
 
-export function deleteMenuItem(id) {
-  return deleteDoc(doc(db, "menu", id));
+export async function deleteMenuItem(id) {
+  await authedFetch(`${MENU_URL}?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+  invalidate(MENU_URL);
 }
 
 export function useOrders() {
-  const [orders, setOrders] = useState([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, "orders"), (snap) => {
-      setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
-  return { orders, loading };
+  const { data, loading } = usePolled(ORDERS_URL, { intervalMs: 5000, authed: true, fallback: [] });
+  return { orders: data, loading };
 }
 
-export function deleteOrder(id) {
-  return deleteDoc(doc(db, "orders", id));
-}
-
-// Atomically grabs the next order number so it stays consistent across every device,
-// replacing the old localStorage-based counter + copy/paste flow.
-async function nextOrderNumber() {
-  return runTransaction(db, async (tx) => {
-    const snap = await tx.get(ORDER_COUNTER_DOC);
-    const next = (snap.exists() ? snap.data().value : 0) + 1;
-    tx.set(ORDER_COUNTER_DOC, { value: next });
-    return next;
-  });
+export async function deleteOrder(id) {
+  await authedFetch(`${ORDERS_URL}?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+  invalidate(ORDERS_URL);
 }
 
 export async function addManualOrder(order) {
-  const orderNumber = await nextOrderNumber();
-  return addDoc(collection(db, "orders"), { ...order, orderNumber, placedAt: Date.now(), source: "manual" });
+  const res = await authedFetch(ORDERS_URL, { method: "POST", body: JSON.stringify({ ...order, source: "manual" }) });
+  invalidate(ORDERS_URL);
+  return res;
 }
 
 export async function submitOrder(order) {
-  const orderNumber = await nextOrderNumber();
-  const docRef = await addDoc(collection(db, "orders"), {
-    ...order,
-    orderNumber,
-    placedAt: Date.now(),
-    createdAt: serverTimestamp(),
-    source: "customer",
+  // Placing an order is the one write a never-signed-in customer makes, so this goes through
+  // a plain fetch rather than authedFetch (which would attach a bearer token they don't have).
+  const res = await fetch(ORDERS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...order, source: "customer" }),
   });
-  return { id: docRef.id, orderNumber };
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Could not place order");
+  return data;
 }
