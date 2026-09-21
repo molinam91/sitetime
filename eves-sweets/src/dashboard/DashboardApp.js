@@ -15,7 +15,7 @@ function PinLogin() {
     try {
       await unlockWithPin(pin);
     } catch (e) {
-      toast("Wrong PIN");
+      toast(e.message || "Wrong PIN");
     } finally {
       setSubmitting(false);
     }
